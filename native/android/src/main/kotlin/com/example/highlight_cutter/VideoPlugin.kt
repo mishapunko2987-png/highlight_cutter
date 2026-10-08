@@ -188,9 +188,16 @@ class VideoPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                     metricsBuffer.putDouble(current.motion(previous))
                     metricsBuffer.putDouble(shotLengthSec)
 
-                    current.histogram.copyInto(histogramBuffer, index * HIST_BINS)
+                    // Гистограмма кладётся на позицию written, а не index:
+                    // метрики выше пишутся в буфер подряд, без дыр, поэтому и
+                    // гистограммы должны идти плотно. Раньше при пропущенном
+                    // кадре (getFrameAtTime вернул null) слот по индексу
+                    // оставался нулевым, а метрики сдвигались на один — и
+                    // дорожки описывали разные кадры. Так же поступает iOS,
+                    // где пропуск просто пропускается.
+                    current.histogram.copyInto(histogramBuffer, written * HIST_BINS)
                     previous = current
-                    written = index + 1
+                    written += 1
                     bitmap.recycle()
                 }
 
@@ -343,7 +350,16 @@ class VideoPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
             if (other == null) return 0.0
             var total = 0
             for (i in histogram.indices) {
-                total += abs(histogram[i].toInt() - other.histogram[i].toInt())
+                // Byte в Kotlin знаковый: normalizeBins кладёт 128..255 как
+                // -128..-1. Сравнивать их как Int нельзя — бин 200 против
+                // бина 10 дал бы |(-56) - 10| = 66 вместо 190, и порог
+                // SCENE_THRESHOLD срабатывал бы не там. Гистограмма
+                // нормализована к сумме 255, поэтому читаем беззнаково.
+                // В Dart те же байты приходят как Uint8List, там всё в
+                // порядке, чинить нужно только этот расчёт.
+                val a = histogram[i].toInt() and 0xFF
+                val b = other.histogram[i].toInt() and 0xFF
+                total += abs(a - b)
             }
             return min(1.0, total / 510.0)
         }

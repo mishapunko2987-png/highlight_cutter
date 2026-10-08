@@ -288,6 +288,86 @@ void main() {
     }
   });
 
+  // Регрессия к замечанию «красивый кадр ≠ интересный момент»: неподвижный
+  // кадр набирал полный балл по резкости и цвету, хотя в нём ничего не
+  // происходило. Домножитель активности отдаёт предпочтение движущему кадру.
+  test('неподвижный красивый кадр проигрывает движущему', () {
+    const step = 500000;
+    final frames = <FrameSample>[];
+    for (var i = 0; i < 120; i++) {
+      if (i >= 10 && i < 30) {
+        // Красиво, но статично: ни движения, ни людей.
+        frames.add(frame(
+          timeUs: i * step,
+          sharpness: 0.95,
+          colorfulness: 0.95,
+          faces: 0,
+          motion: 0.0,
+        ));
+      } else if (i >= 70 && i < 90) {
+        // Чуть менее красиво, зато что-то происходит.
+        frames.add(frame(
+          timeUs: i * step,
+          sharpness: 0.92,
+          colorfulness: 0.88,
+          faces: 3,
+          motion: 0.6,
+        ));
+      } else {
+        frames.add(frame(
+          timeUs: i * step,
+          sharpness: 0.3,
+          colorfulness: 0.3,
+          faces: 0,
+          motion: 0.05,
+        ));
+      }
+    }
+
+    final result = selector.select(
+      analysisOf(frames),
+      const HighlightSettings(
+        maxClips: 1,
+        clipDurationSec: 8,
+        minGapSec: 0,
+      ),
+    );
+
+    expect(result, hasLength(1));
+    expect(result.first.peakUs, greaterThanOrEqualTo(70 * step));
+    expect(result.first.peakUs, lessThan(90 * step));
+  });
+
+  // Регрессия к ранжированию только по пиковому кадру: одиночный яркий кадр
+  // посреди скучного фильма больше не обгоняет ровный участок, который
+  // интересен целиком.
+  test('окно лучше одиночного яркого кадра', () {
+    const step = 500000;
+    final frames = <FrameSample>[];
+    for (var i = 0; i < 160; i++) {
+      if (i == 30) {
+        frames.add(frame(timeUs: i * step, sharpness: 0.99, colorfulness: 0.9));
+      } else if (i >= 80 && i < 120) {
+        frames.add(frame(timeUs: i * step, sharpness: 0.75, colorfulness: 0.6));
+      } else {
+        frames.add(frame(timeUs: i * step, sharpness: 0.25, colorfulness: 0.2));
+      }
+    }
+
+    final result = selector.select(
+      analysisOf(frames),
+      const HighlightSettings(
+        maxClips: 1,
+        clipDurationSec: 8,
+        minGapSec: 0,
+      ),
+    );
+
+    expect(result, hasLength(1));
+    expect(result.first.peakUs, greaterThanOrEqualTo(80 * step));
+    expect(result.first.peakUs, lessThan(120 * step));
+  });
+
   test('пустая гистограмма не роняет отбор', () {
     const step = 500000;
     final frames =

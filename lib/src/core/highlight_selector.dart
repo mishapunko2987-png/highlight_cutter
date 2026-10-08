@@ -71,6 +71,7 @@ class HighlightSelector {
       frames.map((f) => math.min(f.faces / 3.0, 1.0)).toList(),
     );
     final motion = _robustNormalize(frames.map((f) => f.motion).toList());
+    final activity = _activityScores(frames);
 
     final w = settings.weights;
     return List<double>.generate(frames.length, (i) {
@@ -93,9 +94,32 @@ class HighlightSelector {
       if (weightSum == 0) return 0;
       var score = sum / weightSum;
       if (frames[i].shotLengthSec < 1.0) score *= 0.6;
-      return score;
+      // Качество картинки само по себе не делает момент интересным: неподвижный
+      // красивый кадр набирает полный балл по резкости, цвету и экспозиции.
+      // Движение и люди в кадре — признак того, что что-то происходит,
+      // поэтому они домножают оценку, а не просто суммируются с ней.
+      return score * activity[i];
     });
   }
+
+  /// Насколько в кадре что-то происходит: движение или присутствие людей.
+  /// Возвращает коэффициент от [activityFloor] до 1, который домножается к
+  /// оценке кадра.
+  List<double> _activityScores(List<FrameSample> frames) {
+    return frames.map((f) {
+      final byMotion = (f.motion / activityMotionFull).clamp(0.0, 1.0);
+      final byPeople = math.min(f.faces / 1.0, 1.0);
+      final level = math.max(byMotion, byPeople);
+      return activityFloor + (1.0 - activityFloor) * level;
+    }).toList();
+  }
+
+  /// Нижняя граница коэффициента: полностью неподвижный кадр без людей теряет
+  /// 30% оценки, но не выпадает из отбора совсем.
+  static const double activityFloor = 0.7;
+
+  /// Движение, при котором кадр считается «живым» целиком.
+  static const double activityMotionFull = 0.3;
 
   double _exposureScore(FrameSample f) {
     final under = f.clippedLow;
@@ -163,8 +187,17 @@ class HighlightSelector {
     final gapUs = (settings.minGapSec * 1e6).round();
     final minUs = (settings.minClipDurationSec * 1e6).round();
 
+    // Кандидаты ранжируются не по одному кадру, а по окну клипа: среднее по
+    // сглаженному скору внутри окна плюс сам пик. Один яркий кадр посреди
+    // скучного фильма больше не обгоняет ровный участок, который целиком
+    // интересный — раньше сортировка шла только по пиковому кадру.
+    final windowScore = _windowScores(smoothed, frames, clipUs);
+
     final candidates = List<int>.generate(frames.length, (i) => i)
       ..sort((a, b) {
+        final byWindow = _rankScore(smoothed, windowScore, a)
+            .compareTo(_rankScore(smoothed, windowScore, b));
+        if (byWindow != 0) return byWindow;
         final byScore = smoothed[b].compareTo(smoothed[a]);
         if (byScore != 0) return byScore;
         return raw[b].compareTo(raw[a]);
@@ -221,6 +254,45 @@ class HighlightSelector {
     chosen.sort((a, b) => a.startUs.compareTo(b.startUs));
     return chosen;
   }
+
+  /// Средний сглаженный скор по окну длиной [clipUs] вокруг кадра [i].
+  /// Скользящее окно двумя указателями: отсортированные по времени кадры
+  /// позволяют не пересчитывать сумму на каждом шаге.
+  List<double> _windowScores(
+    List<double> smoothed,
+    List<FrameSample> frames,
+    int clipUs,
+  ) {
+    final n = frames.length;
+    final halfUs = clipUs ~/ 2;
+    final result = List<double>.filled(n, 0.0);
+    var lo = 0;
+    var hi = 0;
+    var sum = 0.0;
+    for (var i = 0; i < n; i++) {
+      final center = frames[i].timeUs;
+      while (hi < n && frames[hi].timeUs <= center + halfUs) {
+        sum += smoothed[hi];
+        hi++;
+      }
+      while (lo < hi && frames[lo].timeUs < center - halfUs) {
+        sum -= smoothed[lo];
+        lo++;
+      }
+      final count = hi - lo;
+      result[i] = count == 0 ? 0.0 : sum / count;
+    }
+    return result;
+  }
+
+  /// Итоговая оценка кандидата: пик весит [windowPeakWeight], качество
+  /// окна — остальное.
+  double _rankScore(List<double> smoothed, List<double> windowScore, int i) {
+    return windowPeakWeight * smoothed[i] +
+        (1.0 - windowPeakWeight) * windowScore[i];
+  }
+
+  static const double windowPeakWeight = 0.6;
 
   int _refinePeak(int candidate, List<double> raw, List<double> smoothed) {
     var best = candidate;
