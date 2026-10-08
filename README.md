@@ -68,7 +68,15 @@ test/                         тесты отбора моментов
 
 ## Запуск
 
-Нужен Flutter SDK 3.19+.
+Нужен Flutter SDK 3.22+ (в CI закреплён 3.24.5).
+
+Android-часть использует Kotlin DSL (`build.gradle.kts`), и Flutter научился
+распознавать его только с 3.22. На более старой версии инструмент ищет
+`android/build.gradle`, не находит его, решает что проект не на Gradle, ищет
+манифест не по тому пути и объявляет приложение использующим embedding v1 —
+после чего `flutter pub get` падает с
+«The plugin `file_picker` requires your app to be migrated to the Android
+embedding v2», хотя приложение уже на v2.
 
 ```bash
 flutter pub get
