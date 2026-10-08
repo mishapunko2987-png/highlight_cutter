@@ -126,6 +126,67 @@ void main() {
     }
   });
 
+  // Регрессия: приложение выдавало 15 моментов из одного эпизода — все
+  // лучшие пики яркого отрезка шли подряд, и зазора в пару секунд хватало,
+  // чтобы все они прошли. Зазор в 30 с оставляет из эпизода один момент.
+  test('соседние моменты разведены минимум на minGapSec', () {
+    const step = 500000;
+    final frames = <FrameSample>[];
+    for (var i = 0; i < 600; i++) {
+      // Один яркий отрезок: первые 60 кадров — максимум, дальше ровный фон
+      // с отдельными всплесками.
+      final sharp = i < 60
+          ? 0.95
+          : (i % 150 == 0 ? 0.8 : 0.2);
+      frames.add(frame(timeUs: i * step, sharpness: sharp));
+    }
+
+    final result = selector.select(
+      analysisOf(frames),
+      const HighlightSettings(maxClips: 15, clipDurationSec: 8, minGapSec: 30),
+    );
+
+    for (var i = 1; i < result.length; i++) {
+      final gapSec = (result[i].startUs - result[i - 1].endUs) / 1e6;
+      expect(gapSec, greaterThanOrEqualTo(30.0));
+    }
+  });
+
+  test('из одного яркого эпизода берётся один момент', () {
+    const step = 500000;
+    // Ровно один яркий отрезок длиной 30 с. Клип 8 с плюс зазор 30 с
+    // занимают 38 с, поэтому второй момент в него не помещается в принципе.
+    final frames = List.generate(60, (i) => frame(
+          timeUs: i * step,
+          sharpness: 0.9,
+        ));
+
+    final result = selector.select(
+      analysisOf(frames),
+      const HighlightSettings(maxClips: 15, clipDurationSec: 8, minGapSec: 30),
+    );
+
+    expect(result, hasLength(1));
+  });
+
+  test('нулевой зазор не ломает отбор, моменты просто не пересекаются', () {
+    const step = 500000;
+    final frames = List.generate(400, (i) => frame(
+          timeUs: i * step,
+          sharpness: i % 50 == 0 ? 0.95 : 0.2,
+        ));
+
+    final result = selector.select(
+      analysisOf(frames),
+      const HighlightSettings(maxClips: 5, minGapSec: 0),
+    );
+
+    expect(result, isNotEmpty);
+    for (var i = 1; i < result.length; i++) {
+      expect(result[i].startUs, greaterThanOrEqualTo(result[i - 1].endUs));
+    }
+  });
+
   test('моменты отсортированы по времени', () {
     const step = 500000;
     final frames = List.generate(

@@ -192,10 +192,18 @@ class HighlightSelector {
       endUs = math.min(endUs, sceneRange.$2);
       if (endUs - startUs < minUs) continue;
 
-      final overlaps = takenRanges.any(
+      // Дедупликация. Момент отбрасывается, если он пересекается с уже
+      // взятым или отстоит от него меньше чем на gapUs (зазор считается от
+      // конца предыдущего клипа до начала следующего).
+      //
+      // Проверка на пересечение сама по себе не спасала от «одного эпизода
+      // 15 раз»: лучшие пики яркого отрезка идут подряд с шагом в пару
+      // секунд, при зазоре в 2 с все они проходили. Именно зазор разводит
+      // моменты по фильму.
+      final tooClose = takenRanges.any(
         (r) => startUs < r[1] + gapUs && endUs > r[0] - gapUs,
       );
-      if (overlaps) continue;
+      if (tooClose) continue;
 
       takenRanges.add([startUs, endUs]);
       chosen.add(

@@ -29,13 +29,22 @@ class HighlightSettings {
     this.maxClips = 5,
     this.minClipDurationSec = 3.0,
     this.weights = defaultWeights,
-    this.minGapSec = 2.0,
+    this.minGapSec = 30.0,
     this.minSceneSec = 1.5,
   });
 
   final double clipDurationSec;
   final int maxClips;
   final double minClipDurationSec;
+
+  /// Минимальный свободный интервал между соседними моментами, секунды.
+  ///
+  /// Считается от конца предыдущего клипа до начала следующего. Без него
+  /// все лучшие пики одного яркого эпизода попадали в выдачу: они идут
+  /// подряд с шагом в пару секунд, и пользователь получал 15 почти
+  /// одинаковых клипов вместо 15 разных. С зазором в 30 с из одного
+  /// эпизода берётся один момент, а остальные клипы распределяются по
+  /// фильму.
   final double minGapSec;
 
   /// Короткие «сцены» не считаются сменой сцены: кадры, резко отличающиеся

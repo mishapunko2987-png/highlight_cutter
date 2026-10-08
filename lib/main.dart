@@ -425,6 +425,7 @@ class _SettingsSheet extends StatefulWidget {
 class _SettingsSheetState extends State<_SettingsSheet> {
   late double _clipDuration = widget.settings.clipDurationSec;
   late int _maxClips = widget.settings.maxClips;
+  late double _minGap = widget.settings.minGapSec;
   late Map<String, double> _weights = Map.of(widget.settings.weights);
 
   static const _labels = <String, String>{
@@ -470,6 +471,14 @@ class _SettingsSheetState extends State<_SettingsSheet> {
             divisions: 14,
             onChanged: (v) => setState(() => _maxClips = v.round()),
           ),
+          Text('Минимальный интервал: ${_minGap.toStringAsFixed(0)} с'),
+          Slider(
+            value: _minGap,
+            min: 5,
+            max: 120,
+            divisions: 23,
+            onChanged: (v) => setState(() => _minGap = v),
+          ),
           const Divider(height: 24),
           for (final key in _labels.keys)
             Column(
@@ -491,6 +500,9 @@ class _SettingsSheetState extends State<_SettingsSheet> {
               HighlightSettings(
                 clipDurationSec: _clipDuration,
                 maxClips: _maxClips,
+                minGapSec: _minGap,
+                minClipDurationSec: widget.settings.minClipDurationSec,
+                minSceneSec: widget.settings.minSceneSec,
                 weights: _weights,
               ),
             ),
