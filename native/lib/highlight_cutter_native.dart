@@ -75,13 +75,23 @@ class HighlightCutterNative {
   FrameAnalysis _decodeAnalysis(Map<Object?, Object?> result) {
     final metrics = result['metrics'] as Uint8List? ?? Uint8List(0);
     final histograms = result['histograms'] as Uint8List? ?? Uint8List(0);
-    final view = metrics.buffer.asFloat64List(
-      metrics.offsetInBytes,
-      metrics.lengthInBytes ~/ 8,
-    );
+
+    // Uint8List из MethodChannel — не самостоятельный буфер, а view внутрь
+    // сообщения: StandardMessageCodec отдаёт
+    // data.buffer.asUint8List(offset, length), где offset зависит от того,
+    // что уже записано в сообщение. Для ответа analyzeFrames он не кратен 8,
+    // и asFloat64List(offset, ...) падает с
+    // «RangeError: Offset (N) must be a multiple of BYTES_PER_ELEMENT (8)».
+    // Копия в свой буфер даёт offsetInBytes == 0.
+    //
+    // Порядок байт little-endian: Kotlin пишет ByteBuffer с nativeOrder(),
+    // Swift копирует [Double] как есть, Android/iOS — little-endian,
+    // строки Float64List читаются в порядке хоста.
+    final aligned = Uint8List.fromList(metrics);
+    final view = aligned.buffer.asFloat64List(aligned.lengthInBytes ~/ 8);
 
     final frames = <FrameSample>[];
-    final count = metrics.lengthInBytes ~/ (kMetricsPerFrame * 8);
+    final count = aligned.lengthInBytes ~/ (kMetricsPerFrame * 8);
     for (var i = 0; i < count; i++) {
       final base = i * kMetricsPerFrame;
       frames.add(
