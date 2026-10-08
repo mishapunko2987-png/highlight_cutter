@@ -195,8 +195,11 @@ class HighlightSelector {
 
     final candidates = List<int>.generate(frames.length, (i) => i)
       ..sort((a, b) {
-        final byWindow = _rankScore(smoothed, windowScore, a)
-            .compareTo(_rankScore(smoothed, windowScore, b));
+        // compareTo: отрицательное значение означает «a раньше b», поэтому
+        // сортируем по убыванию — b.compareTo(a), иначе первыми в цикле
+        // окажутся худшие кадры.
+        final byWindow = _rankScore(smoothed, windowScore, b)
+            .compareTo(_rankScore(smoothed, windowScore, a));
         if (byWindow != 0) return byWindow;
         final byScore = smoothed[b].compareTo(smoothed[a]);
         if (byScore != 0) return byScore;

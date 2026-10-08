@@ -247,7 +247,13 @@ void main() {
     final histograms = <Uint8List>[];
 
     for (var i = 0; i < 60; i++) {
-      frames.add(frame(timeUs: i * step, sharpness: 0.5));
+      // Первая сцена должна быть привлекательнее второй, иначе выбор пика —
+      // ничья и результат зависит от порядка сортировки, а проверять тут
+      // нужно обрезку клипа по границе сцены.
+      frames.add(frame(
+        timeUs: i * step,
+        sharpness: i < 30 ? 0.9 : 0.2,
+      ));
       histograms.add(peakHistogram(i < 30 ? 5 : 50));
     }
 
