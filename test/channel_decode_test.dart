@@ -7,7 +7,8 @@ import 'package:highlight_cutter_native/highlight_cutter_native.dart';
 const MethodChannel _channel = MethodChannel('highlight_cutter/video');
 
 /// Упаковывает метрики так же, как нативная сторона: плотный массив
-/// float64 без заголовка, little-endian.
+/// float64 без заголовка, little-endian (Kotlin пишет через ByteBuffer с
+/// METRICS_BYTE_ORDER = LITTLE_ENDIAN, Swift копирует [Double] как есть).
 Uint8List encodeMetrics(List<List<double>> frames) {
   final data = Float64List(frames.length * kMetricsPerFrame);
   for (var f = 0; f < frames.length; f++) {
@@ -18,6 +19,20 @@ Uint8List encodeMetrics(List<List<double>> frames) {
   return Uint8List.fromList(
     data.buffer.asUint8List(data.offsetInBytes, data.lengthInBytes),
   );
+}
+
+/// Собирает байты явно в little-endian, как это обязан делать Kotlin, —
+/// чтобы тест не зависел от архитектуры машины, на которой идёт проверка.
+Uint8List encodeMetricsLittleEndian(List<List<double>> frames) {
+  final data = ByteData(frames.length * kMetricsPerFrame * 8);
+  var offset = 0;
+  for (final f in frames) {
+    for (final value in f) {
+      data.setFloat64(offset, value, Endian.little);
+      offset += 8;
+    }
+  }
+  return Uint8List.fromList(data.buffer.asUint8List());
 }
 
 void mockAnalysis(Uint8List metrics, {Uint8List? histograms}) {
@@ -86,12 +101,49 @@ void main() {
     }
   });
 
-  test('пустой ответ не падает и даёт ноль кадров', () async {
-    mockAnalysis(Uint8List(0));
+test('пустой ответ не падает и даёт ноль кадров', () async {
+mockAnalysis(Uint8List(0));
 
     final analysis = await HighlightCutterNative().analyzeFrames('/tmp/a.mp4');
 
     expect(analysis.frames, isEmpty);
     expect(analysis.isEmpty, isTrue);
+  });
+
+  // Контракт порядка байт: Kotlin пишет метрики в little-endian, значит Dart
+  // обязан читать их как Endian.little. Собранные вручную байты однозначно
+  // задают порядок, поэтому тест не зависит от архитектуры машины.
+  test('метрики читаются как little-endian', () async {
+    final metrics = encodeMetricsLittleEndian([
+      frame(1000, 0.5, 2),
+      frame(1500, 0.7, 1),
+    ]);
+    mockAnalysis(metrics);
+
+    final analysis = await HighlightCutterNative().analyzeFrames('/tmp/a.mp4');
+
+    expect(analysis.frames[0].timeUs, 1000);
+    expect(analysis.frames[0].sharpness, 0.5);
+    expect(analysis.frames[0].faces, 2);
+    expect(analysis.frames[1].timeUs, 1500);
+    expect(analysis.frames[1].sharpness, 0.7);
+  });
+
+  // 1.0 в little-endian — это 00 00 00 00 00 00 F0 3F. Если бы Dart читал в
+  // порядке хоста на big-endian машине или наоборот, значения были бы другими.
+  test('байты double разбираются в известном порядке', () async {
+    final data = ByteData(8)..setFloat64(0, 1.0, Endian.little);
+    final metrics = Uint8List.fromList(data.buffer.asUint8List());
+    expect(
+      metrics,
+      [0, 0, 0, 0, 0, 0, 0xF0, 0x3F],
+      reason: '1.0 в little-endian',
+    );
+
+    mockAnalysis(metrics);
+
+    final analysis = await HighlightCutterNative().analyzeFrames('/tmp/a.mp4');
+    expect(analysis.frames, hasLength(1));
+    expect(analysis.frames.first.sharpness, 0.0);
   });
 }

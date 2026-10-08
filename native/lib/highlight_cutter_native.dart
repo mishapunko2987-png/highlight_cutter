@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+
 import 'package:flutter/services.dart';
 
 import 'models.dart';
@@ -76,38 +78,40 @@ class HighlightCutterNative {
     final metrics = result['metrics'] as Uint8List? ?? Uint8List(0);
     final histograms = result['histograms'] as Uint8List? ?? Uint8List(0);
 
+    // Порядок байт задан явно: Kotlin пишет метрики через
+    // ByteBuffer с METRICS_BYTE_ORDER (LITTLE_ENDIAN), Swift копирует
+    // [Double] как есть, а на Android и iOS это little-endian. Читаем через
+    // ByteData с Endian.little, чтобы контракт не зависел от порядка хоста.
+    //
     // Uint8List из MethodChannel — не самостоятельный буфер, а view внутрь
     // сообщения: StandardMessageCodec отдаёт
     // data.buffer.asUint8List(offset, length), где offset зависит от того,
-    // что уже записано в сообщение. Для ответа analyzeFrames он не кратен 8,
-    // и asFloat64List(offset, ...) падает с
-    // «RangeError: Offset (N) must be a multiple of BYTES_PER_ELEMENT (8)».
-    // Копия в свой буфер даёт offsetInBytes == 0.
-    //
-    // Порядок байт little-endian: Kotlin пишет ByteBuffer с nativeOrder(),
-    // Swift копирует [Double] как есть, Android/iOS — little-endian,
-    // строки Float64List читаются в порядке хоста.
-    final aligned = Uint8List.fromList(metrics);
-    // Первый аргумент asFloat64List — это смещение, а не длина, поэтому
-    // передаём оба явно.
-    final view = aligned.buffer.asFloat64List(0, aligned.lengthInBytes ~/ 8);
+    // что уже записано в сообщение, и не кратен 8. ByteData.sublistView
+    // берёт границы по самому списку, поэтому выравнивание не требуется
+    // (в отличие от asFloat64List(offset, ...), который падал с
+    // «RangeError: Offset (N) must be a multiple of BYTES_PER_ELEMENT (8)»).
+    final data = ByteData.sublistView(
+      metrics.isEmpty ? Uint8List(0) : metrics,
+    );
+
+    double metric(int frame, int index) =>
+        data.getFloat64((frame * kMetricsPerFrame + index) * 8, Endian.little);
 
     final frames = <FrameSample>[];
-    final count = aligned.lengthInBytes ~/ (kMetricsPerFrame * 8);
+    final count = metrics.lengthInBytes ~/ (kMetricsPerFrame * 8);
     for (var i = 0; i < count; i++) {
-      final base = i * kMetricsPerFrame;
       frames.add(
         FrameSample(
-          timeUs: view[base + kTimeUs].round(),
-          sharpness: view[base + kSharpness],
-          lumaMean: view[base + kLumaMean],
-          lumaStd: view[base + kLumaStd],
-          clippedLow: view[base + kClippedLow],
-          clippedHigh: view[base + kClippedHigh],
-          colorfulness: view[base + kColorfulness],
-          faces: view[base + kFaces].round(),
-          motion: view[base + kMotion],
-          shotLengthSec: view[base + kShotLengthSec],
+          timeUs: metric(i, kTimeUs).round(),
+          sharpness: metric(i, kSharpness),
+          lumaMean: metric(i, kLumaMean),
+          lumaStd: metric(i, kLumaStd),
+          clippedLow: metric(i, kClippedLow),
+          clippedHigh: metric(i, kClippedHigh),
+          colorfulness: metric(i, kColorfulness),
+          faces: metric(i, kFaces).round(),
+          motion: metric(i, kMotion),
+          shotLengthSec: metric(i, kShotLengthSec),
         ),
       );
     }

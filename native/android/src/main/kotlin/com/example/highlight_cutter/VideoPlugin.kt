@@ -22,8 +22,6 @@ class VideoPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
     private companion object {
         const val CHANNEL = "highlight_cutter/video"
         const val PROGRESS_CHANNEL = "highlight_cutter/video_progress"
-        const val METRICS_PER_FRAME = 10
-        const val HIST_BINS = 64
         const val ANALYSIS_WIDTH = 192
         const val MAX_ANALYSIS_FRAMES = 6000
         const val SHARP_NORM = 0.00012
@@ -152,14 +150,10 @@ class VideoPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                 effectiveStep = durationMs * 1000L / MAX_ANALYSIS_FRAMES
             }
 
-            val metricsBuffer = ByteBuffer.allocateDirect(
-                totalFrames * METRICS_PER_FRAME * 8
-            ).order(ByteOrder.nativeOrder())
-            val histogramBuffer = ByteArray(totalFrames * HIST_BINS)
+            val writer = AnalysisWriter(totalFrames)
 
             var previous: FrameData? = null
             var lastBoundaryUs = 0L
-            var written = 0
 
             for (index in 0 until totalFrames) {
                 if (cancelled) throw IllegalStateException("cancelled")
@@ -177,27 +171,26 @@ class VideoPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                         lastBoundaryUs = timeUs
                     }
 
-                    metricsBuffer.putDouble(timeUs.toDouble())
-                    metricsBuffer.putDouble(current.sharpness)
-                    metricsBuffer.putDouble(current.lumaMean)
-                    metricsBuffer.putDouble(current.lumaStd)
-                    metricsBuffer.putDouble(current.clippedLow)
-                    metricsBuffer.putDouble(current.clippedHigh)
-                    metricsBuffer.putDouble(current.colorfulness)
-                    metricsBuffer.putDouble(current.faces.toDouble())
-                    metricsBuffer.putDouble(current.motion(previous))
-                    metricsBuffer.putDouble(shotLengthSec)
-
-                    // Гистограмма кладётся на позицию written, а не index:
-                    // метрики выше пишутся в буфер подряд, без дыр, поэтому и
-                    // гистограммы должны идти плотно. Раньше при пропущенном
-                    // кадре (getFrameAtTime вернул null) слот по индексу
-                    // оставался нулевым, а метрики сдвигались на один — и
-                    // дорожки описывали разные кадры. Так же поступает iOS,
-                    // где пропуск просто пропускается.
-                    current.histogram.copyInto(histogramBuffer, written * HIST_BINS)
+                    // AnalysisWriter пишет обе дорожки на позицию taken, то
+                    // есть по счётчику принятых кадров. Пропущенный кадр
+                    // (bitmap == null) просто не добавляется, и тогда i-я
+                    // позиция в обеих дорожках описывает один и тот же кадр.
+                    writer.add(
+                        doubleArrayOf(
+                            timeUs.toDouble(),
+                            current.sharpness,
+                            current.lumaMean,
+                            current.lumaStd,
+                            current.clippedLow,
+                            current.clippedHigh,
+                            current.colorfulness,
+                            current.faces.toDouble(),
+                            current.motion(previous),
+                            shotLengthSec,
+                        ),
+                        current.histogram,
+                    )
                     previous = current
-                    written += 1
                     bitmap.recycle()
                 }
 
@@ -209,17 +202,13 @@ class VideoPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                 }
             }
 
-            if (written == 0) throw IllegalStateException("Не удалось извлечь кадры")
-
-            metricsBuffer.flip()
-            val trimmed = ByteArray(written * METRICS_PER_FRAME * 8)
-            metricsBuffer.duplicate().get(trimmed)
+            if (writer.written == 0) throw IllegalStateException("Не удалось извлечь кадры")
 
             mainHandler.post { progressChannel?.invokeMethod(progressMethod, 1.0) }
 
             return mapOf(
-                "metrics" to trimmed,
-                "histograms" to histogramBuffer.copyOfRange(0, written * HIST_BINS),
+                "metrics" to writer.metricsBytes(),
+                "histograms" to writer.histogramBytes(),
                 "sampleIntervalUs" to effectiveStep,
             )
         } finally {
@@ -348,20 +337,7 @@ class VideoPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
 
         fun histogramDistance(other: FrameData?): Double {
             if (other == null) return 0.0
-            var total = 0
-            for (i in histogram.indices) {
-                // Byte в Kotlin знаковый: normalizeBins кладёт 128..255 как
-                // -128..-1. Сравнивать их как Int нельзя — бин 200 против
-                // бина 10 дал бы |(-56) - 10| = 66 вместо 190, и порог
-                // SCENE_THRESHOLD срабатывал бы не там. Гистограмма
-                // нормализована к сумме 255, поэтому читаем беззнаково.
-                // В Dart те же байты приходят как Uint8List, там всё в
-                // порядке, чинить нужно только этот расчёт.
-                val a = histogram[i].toInt() and 0xFF
-                val b = other.histogram[i].toInt() and 0xFF
-                total += abs(a - b)
-            }
-            return min(1.0, total / 510.0)
+            return FrameMetrics.histogramDistance(histogram, other.histogram)
         }
 
         companion object {
@@ -440,17 +416,8 @@ class VideoPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                 )
             }
 
-            private fun normalizeBins(binCounts: IntArray): ByteArray {
-                var total = 0
-                for (count in binCounts) total += count
-                val out = ByteArray(binCounts.size)
-                if (total <= 0) return out
-                for (i in binCounts.indices) {
-                    val scaled = Math.round(binCounts[i].toDouble() * 255.0 / total)
-                    out[i] = scaled.coerceIn(0, 255).toByte()
-                }
-                return out
-            }
+            private fun normalizeBins(binCounts: IntArray): ByteArray =
+                FrameMetrics.normalizeBins(binCounts)
 
             private fun laplacianVariance(luma: DoubleArray, w: Int, h: Int): Double {
                 if (w < 3 || h < 3) return 0.0
