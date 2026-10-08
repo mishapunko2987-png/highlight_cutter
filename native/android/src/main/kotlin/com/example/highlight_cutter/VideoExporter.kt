@@ -66,7 +66,6 @@ internal class VideoExporter(private val request: ExportRequest) {
         var encoder: MediaCodec? = null
         var decoder: MediaCodec? = null
         var decoderSurface: Surface? = null
-        var surfaceTexture: SurfaceTexture? = null
         var egl: EglBridge? = null
         val audio = AudioPipeline(request.sourcePath)
         val state = MuxState()
@@ -99,9 +98,7 @@ internal class VideoExporter(private val request: ExportRequest) {
             egl = EglBridge(encoderSurface)
             egl.makeCurrent()
 
-            surfaceTexture = SurfaceTexture(egl.textureId)
-            surfaceTexture.setDefaultBufferSize(width, height)
-            decoderSurface = Surface(surfaceTexture)
+            decoderSurface = egl.createDecoderSurface(width, height)
 
             decoder = MediaCodec.createDecoderByType(mime)
             decoder.configure(sourceFormat, decoderSurface, null, 0)
@@ -155,9 +152,10 @@ internal class VideoExporter(private val request: ExportRequest) {
             runCatching { decoder?.release() }
             runCatching { encoder?.stop() }
             runCatching { encoder?.release() }
+            // Surface освобождаем до EglBridge: мост владеет SurfaceTexture
+            // и освобождает его у себя.
+            runCatching { decoderSurface?.release() }
             egl?.release()
-            decoderSurface?.release()
-            surfaceTexture?.release()
             if (state.started) runCatching { muxer.stop() }
             runCatching { muxer.release() }
             extractor.release()
@@ -575,8 +573,30 @@ internal class EglBridge(private val surface: Surface) {
     private var eglSurface: EGLSurface = EGL14.EGL_NO_SURFACE
     private var presentationTimeUs = 0L
 
+    // SurfaceTexture, в который декодер кладёт кадры. Пока из него не взят
+    // кадр через updateTexImage(), текстура пустая.
+    private var frameTexture: SurfaceTexture? = null
+
+    // glVertexAttribPointer не копирует данные, поэтому буферы вершин
+    // нужно удерживать — иначе GC освободит память под ними.
+    private var positionBuffer: ByteBuffer? = null
+    private var texCoordBuffer: ByteBuffer? = null
+
     var textureId = 0
         private set
+
+    /**
+     * Декодер рендерит в SurfaceTexture, потребитель забирает кадр через
+     * updateTexImage() и рисует его в поверхность энкодера. Без
+     * updateTexImage() текстура остаётся незаполненной, шейдер рисует
+     * константу, и в ролике оказывается один и тот же кадр.
+     */
+    fun createDecoderSurface(width: Int, height: Int): Surface {
+        frameTexture = SurfaceTexture(textureId).also {
+            it.setDefaultBufferSize(width, height)
+        }
+        return Surface(frameTexture!!)
+    }
 
     fun makeCurrent() {
         display = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY)
@@ -621,12 +641,19 @@ internal class EglBridge(private val surface: Surface) {
     }
 
     fun swapAndDraw() {
+        // Забираем очередной кадр из SurfaceTexture. Пропуск этого вызова —
+        // причина, по которой весь ролик состоял из одного кадра.
+        frameTexture?.updateTexImage()
         EGLExt.eglPresentationTimeANDROID(display, eglSurface, presentationTimeUs)
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+        GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, textureId)
         GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
         EGL14.eglSwapBuffers(display, eglSurface)
     }
 
     fun release() {
+        frameTexture?.release()
+        frameTexture = null
         if (display != EGL14.EGL_NO_DISPLAY) {
             EGL14.eglMakeCurrent(
                 display,
@@ -710,24 +737,26 @@ internal class EglBridge(private val surface: Surface) {
 
         val positionHandle = GLES20.glGetAttribLocation(program, "aPosition")
         GLES20.glEnableVertexAttribArray(positionHandle)
+        positionBuffer = directFloatBuffer(floatArrayOf(-1f, -1f, 1f, -1f, -1f, 1f, 1f, 1f))
         GLES20.glVertexAttribPointer(
             positionHandle,
             2,
             GLES20.GL_FLOAT,
             false,
             0,
-            directFloatBuffer(floatArrayOf(-1f, -1f, 1f, -1f, -1f, 1f, 1f, 1f)),
+            positionBuffer,
         )
 
         val texCoordHandle = GLES20.glGetAttribLocation(program, "aTexCoord")
         GLES20.glEnableVertexAttribArray(texCoordHandle)
+        texCoordBuffer = directFloatBuffer(floatArrayOf(0f, 0f, 1f, 0f, 0f, 1f, 1f, 1f))
         GLES20.glVertexAttribPointer(
             texCoordHandle,
             2,
             GLES20.GL_FLOAT,
             false,
             0,
-            directFloatBuffer(floatArrayOf(0f, 0f, 1f, 0f, 0f, 1f, 1f, 1f)),
+            texCoordBuffer,
         )
     }
 
