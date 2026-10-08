@@ -33,7 +33,13 @@ android {
 
     buildTypes {
         release {
+            // Flutter Gradle-плагин для release выставляет minifyEnabled=true
+            // и shrinkResources=true. Наш блок выполняется позже, поэтому
+            // сжатие кода отключается — тогда AGP требует отключить и
+            // удаление неиспользуемых ресурсов, иначе конфигурация падает с
+            // «Removing unused resources requires unused code shrinking».
             isMinifyEnabled = false
+            isShrinkResources = false
             signingConfig = signingConfigs.getByName("debug")
         }
     }
