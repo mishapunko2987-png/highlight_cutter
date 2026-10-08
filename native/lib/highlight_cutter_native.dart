@@ -88,7 +88,9 @@ class HighlightCutterNative {
     // Swift копирует [Double] как есть, Android/iOS — little-endian,
     // строки Float64List читаются в порядке хоста.
     final aligned = Uint8List.fromList(metrics);
-    final view = aligned.buffer.asFloat64List(aligned.lengthInBytes ~/ 8);
+    // Первый аргумент asFloat64List — это смещение, а не длина, поэтому
+    // передаём оба явно.
+    final view = aligned.buffer.asFloat64List(0, aligned.lengthInBytes ~/ 8);
 
     final frames = <FrameSample>[];
     final count = aligned.lengthInBytes ~/ (kMetricsPerFrame * 8);
