@@ -1,0 +1,269 @@
+import 'dart:typed_data';
+
+import 'package:flutter_test/flutter_test.dart';
+import 'package:highlight_cutter/src/core/highlight_selector.dart';
+import 'package:highlight_cutter/src/models/moment.dart';
+import 'package:highlight_cutter_native/highlight_cutter_native.dart';
+
+FrameSample frame({
+  required int timeUs,
+  double sharpness = 0.5,
+  double lumaMean = 0.45,
+  double lumaStd = 0.15,
+  double clippedLow = 0,
+  double clippedHigh = 0,
+  double colorfulness = 0.4,
+  int faces = 0,
+  double motion = 0.2,
+  double shotLengthSec = 5,
+}) {
+  return FrameSample(
+    timeUs: timeUs,
+    sharpness: sharpness,
+    lumaMean: lumaMean,
+    lumaStd: lumaStd,
+    clippedLow: clippedLow,
+    clippedHigh: clippedHigh,
+    colorfulness: colorfulness,
+    faces: faces,
+    motion: motion,
+    shotLengthSec: shotLengthSec,
+  );
+}
+
+/// Гистограмма с одним пиком в бине [bin], нормированная к сумме 255.
+Uint8List peakHistogram(int bin) {
+  final bins = Uint8List(kHistogramBins);
+  bins[bin] = 255;
+  return bins;
+}
+
+FrameAnalysis analysisOf(
+  List<FrameSample> frames, {
+  List<Uint8List>? histograms,
+}) {
+  final bytes = <int>[];
+  for (final h in histograms ??
+      List.generate(
+        frames.length,
+        (_) => Uint8List(kHistogramBins),
+      )) {
+    bytes.addAll(h);
+  }
+  return FrameAnalysis(
+    frames: frames,
+    histograms: Uint8List.fromList(bytes),
+  );
+}
+
+void main() {
+  const selector = HighlightSelector();
+
+  test('пустой анализ не даёт моментов', () {
+    final result = selector.select(
+      analysisOf(const []),
+      const HighlightSettings(),
+    );
+    expect(result, isEmpty);
+  });
+
+  test('один кадр не даёт моментов', () {
+    final result = selector.select(
+      analysisOf([frame(timeUs: 0)]),
+      const HighlightSettings(),
+    );
+    expect(result, isEmpty);
+  });
+
+  test('выбирает лучший кадр из серии', () {
+    const step = 500000;
+    final frames = <FrameSample>[];
+    for (var i = 0; i < 200; i++) {
+      final isPeak = i == 120;
+      frames.add(
+        frame(
+          timeUs: i * step,
+          sharpness: isPeak ? 0.98 : 0.25,
+          lumaMean: isPeak ? 0.48 : 0.5,
+          colorfulness: isPeak ? 0.9 : 0.2,
+          faces: isPeak ? 3 : 0,
+        ),
+      );
+    }
+
+    final result = selector.select(
+      analysisOf(frames),
+      const HighlightSettings(maxClips: 1, clipDurationSec: 6),
+    );
+
+    expect(result, hasLength(1));
+    expect(result.first.peakUs, 120 * step);
+    expect(result.first.endUs - result.first.startUs, 6000000);
+    expect(result.first.reasons, contains('Резкий кадр'));
+    expect(result.first.reasons, contains('Люди в кадре'));
+  });
+
+  test('соблюдает лимит клипов и не пересекает моменты', () {
+    const step = 400000;
+    final frames = <FrameSample>[];
+    for (var i = 0; i < 300; i++) {
+      frames.add(
+        frame(
+          timeUs: i * step,
+          sharpness: (i % 30).isEven ? 0.9 : 0.2,
+        ),
+      );
+    }
+
+    final result = selector.select(
+      analysisOf(frames),
+      const HighlightSettings(maxClips: 4, clipDurationSec: 5),
+    );
+
+    expect(result.length, lessThanOrEqualTo(4));
+    for (var i = 1; i < result.length; i++) {
+      expect(result[i].startUs, greaterThan(result[i - 1].endUs));
+    }
+  });
+
+  test('моменты отсортированы по времени', () {
+    const step = 500000;
+    final frames = List.generate(
+      400,
+      (i) => frame(timeUs: i * step, sharpness: i % 40 == 0 ? 0.95 : 0.2),
+    );
+
+    final result = selector.select(
+      analysisOf(frames),
+      const HighlightSettings(maxClips: 5),
+    );
+
+    for (var i = 1; i < result.length; i++) {
+      expect(result[i].startUs, greaterThanOrEqualTo(result[i - 1].startUs));
+    }
+  });
+
+  test('нулевые веса дают нулевой скор', () {
+    const step = 500000;
+    final frames =
+        List.generate(100, (i) => frame(timeUs: i * step, sharpness: 0.9));
+
+    final result = selector.select(
+      analysisOf(frames),
+      const HighlightSettings(weights: {}),
+    );
+
+    expect(result, isNotEmpty);
+    for (final moment in result) {
+      expect(moment.score, 0);
+    }
+  });
+
+  test('клип не выходит за границы видео', () {
+    const step = 1000000;
+    final frames =
+        List.generate(20, (i) => frame(timeUs: i * step, sharpness: 0.9));
+
+    final result = selector.select(
+      analysisOf(frames),
+      const HighlightSettings(
+        maxClips: 3,
+        clipDurationSec: 8,
+        minClipDurationSec: 1,
+      ),
+    );
+
+    expect(result, isNotEmpty);
+    for (final moment in result) {
+      expect(moment.startUs, greaterThanOrEqualTo(0));
+      expect(moment.endUs, lessThanOrEqualTo(19 * step));
+    }
+  });
+
+  test('смена сцены разрывает клип', () {
+    const step = 500000;
+    final frames = <FrameSample>[];
+    final histograms = <Uint8List>[];
+
+    for (var i = 0; i < 60; i++) {
+      frames.add(frame(timeUs: i * step, sharpness: 0.5));
+      histograms.add(peakHistogram(i < 30 ? 5 : 50));
+    }
+
+    final result = selector.select(
+      analysisOf(frames, histograms: histograms),
+      const HighlightSettings(maxClips: 1, clipDurationSec: 20),
+    );
+
+    expect(result, isNotEmpty);
+    final moment = result.first;
+    expect(moment.endUs, lessThanOrEqualTo(30 * step));
+  });
+
+  test('одинаковые гистограммы не создают границ сцены', () {
+    const step = 500000;
+    final frames =
+        List.generate(60, (i) => frame(timeUs: i * step, sharpness: 0.5));
+    final histograms = List.generate(60, (_) => peakHistogram(20));
+
+    final result = selector.select(
+      analysisOf(frames, histograms: histograms),
+      const HighlightSettings(
+        maxClips: 3,
+        clipDurationSec: 6,
+        minClipDurationSec: 3,
+      ),
+    );
+
+    expect(result, isNotEmpty);
+    // Единственная сцена — весь ролик, поэтому пики в разных её частях доступны.
+    expect(result.length, greaterThan(1));
+    for (final moment in result) {
+      expect(moment.startUs, greaterThanOrEqualTo(0));
+      expect(moment.endUs, lessThanOrEqualTo(59 * step));
+    }
+  });
+
+  test('пустая гистограмма не роняет отбор', () {
+    const step = 500000;
+    final frames =
+        List.generate(40, (i) => frame(timeUs: i * step, sharpness: 0.6));
+    final histograms = <Uint8List>[
+      Uint8List(kHistogramBins),
+      for (var i = 1; i < 40; i++) peakHistogram(20),
+    ];
+
+    final result = selector.select(
+      analysisOf(frames, histograms: histograms),
+      const HighlightSettings(maxClips: 2, clipDurationSec: 6),
+    );
+
+    expect(result, isNotEmpty);
+    for (final moment in result) {
+      expect(moment.endUs - moment.startUs, greaterThan(0));
+    }
+  });
+
+  test('частая смена кадров не ломает отбор', () {
+    const step = 500000;
+    final frames =
+        List.generate(40, (i) => frame(timeUs: i * step, sharpness: 0.6));
+    final histograms = <Uint8List>[
+      for (var i = 0; i < 40; i++) peakHistogram(i % kHistogramBins),
+    ];
+
+    final result = selector.select(
+      analysisOf(frames, histograms: histograms),
+      const HighlightSettings(
+        maxClips: 2,
+        clipDurationSec: 4,
+        minClipDurationSec: 0.5,
+      ),
+    );
+
+    expect(result, isNotEmpty);
+    for (final moment in result) {
+      expect(moment.endUs, lessThanOrEqualTo(39 * step));
+    }
+  });
+}
