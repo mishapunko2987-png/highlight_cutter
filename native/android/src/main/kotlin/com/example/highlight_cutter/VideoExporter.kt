@@ -43,6 +43,11 @@ private class MuxState {
     var audioTrack = -1
     var started = false
     var videoOffsetUs = 0L
+
+    /// Последний записанный таймкод видеодорожки. MediaMuxer требует
+    /// строго возрастающих таймкодов, повторы и откаты приводят к
+    /// повреждению дорожки, поэтому такие сэмплы отбрасываются.
+    var lastVideoPtsUs = Long.MIN_VALUE
 }
 
 internal class VideoExporter(private val request: ExportRequest) {
@@ -125,6 +130,9 @@ internal class VideoExporter(private val request: ExportRequest) {
 
             for ((index, range) in request.ranges.withIndex()) {
                 if (index > 0) {
+                    // Сначала выбираем всё, что энкодер уже закодировал, иначе
+                    // flush() инвалидирует неотданные выходные буферы.
+                    drainEncoder(encoder, muxer, state)
                     encoder.flush()
                     state.videoOffsetUs =
                         request.ranges.take(index).sumOf { it.second - it.first }
@@ -209,11 +217,22 @@ internal class VideoExporter(private val request: ExportRequest) {
 
             val outputIndex = decoder.dequeueOutputBuffer(decoderInfo, TIMEOUT_US)
             if (outputIndex >= 0) {
-                val render = decoderInfo.size > 0
-                if (render) {
+                val hasFrame = decoderInfo.size > 0
+                // seekTo(SEEK_TO_PREVIOUS_SYNC) встаёт на ключевой кадр перед
+                // началом диапазона, и декодеру эти кадры скормить нужно. Но
+                // в клип они попадать не должны.
+                //
+                // Раньше они рендерились с обрезанным временем
+                // max(0, t - range.first + offset), то есть все получали
+                // ОДИН И ТОТ ЖЕ таймкод. На дорожке появлялся кластер
+                // сэмплов с одинаковым временем, и проигрыватель
+                // показывал застывший кадр — в трейлере это выглядело как
+                // «первый момент повторён 5 раз».
+                val inRange = !hasFrame || decoderInfo.presentationTimeUs >= range.first
+                if (hasFrame && inRange) {
                     decoder.releaseOutputBuffer(outputIndex, true)
                     val pts = decoderInfo.presentationTimeUs - range.first + state.videoOffsetUs
-                    egl.setPresentationTime(max(0, pts))
+                    egl.setPresentationTime(pts)
                     egl.swapAndDraw()
                 } else {
                     decoder.releaseOutputBuffer(outputIndex, false)
@@ -263,7 +282,10 @@ internal class VideoExporter(private val request: ExportRequest) {
                 }
                 index >= 0 -> {
                     val buffer = encoder.getOutputBuffer(index)
-                    if (info.size > 0 && buffer != null && state.started) {
+                    if (info.size > 0 && buffer != null && state.started &&
+                        info.presentationTimeUs > state.lastVideoPtsUs
+                    ) {
+                        state.lastVideoPtsUs = info.presentationTimeUs
                         buffer.position(info.offset)
                         buffer.limit(info.offset + info.size)
                         muxer.writeSampleData(state.videoTrack, buffer, info)
@@ -290,7 +312,10 @@ internal class VideoExporter(private val request: ExportRequest) {
                 }
                 index >= 0 -> {
                     val buffer = encoder.getOutputBuffer(index)
-                    if (info.size > 0 && buffer != null && state.started) {
+                    if (info.size > 0 && buffer != null && state.started &&
+                        info.presentationTimeUs > state.lastVideoPtsUs
+                    ) {
+                        state.lastVideoPtsUs = info.presentationTimeUs
                         buffer.position(info.offset)
                         buffer.limit(info.offset + info.size)
                         muxer.writeSampleData(state.videoTrack, buffer, info)
