@@ -91,8 +91,12 @@ internal class VideoExporter(private val request: ExportRequest) {
             encoderFormat.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
 
             encoder = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
-            val encoderSurface = encoder.createInputSurface()
+            // Порядок обязателен: createInputSurface() допустим только в
+            // состоянии Configured. До configure() кодек в Uninitialized, и
+            // Android бросает «setInputSurface() is valid only at Configured
+            // state; currently at Uninitialized state».
             encoder.configure(encoderFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            val encoderSurface = encoder.createInputSurface()
             encoder.start()
 
             egl = EglBridge(encoderSurface)
