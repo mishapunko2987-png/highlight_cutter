@@ -129,21 +129,38 @@ mockAnalysis(Uint8List(0));
     expect(analysis.frames[1].sharpness, 0.7);
   });
 
+  // Один кадр — это kMetricsPerFrame double, то есть 80 байт. Раньше тест
+  // отдавал всего один double, и счётчик кадров давал ноль.
+  test('один кадр из одних нулей декодируется', () async {
+    final data = ByteData(kMetricsPerFrame * 8);
+    data.setFloat64(kTimeUs * 8, 2000.0, Endian.little);
+
+    mockAnalysis(Uint8List.fromList(data.buffer.asUint8List()));
+
+    final analysis = await HighlightCutterNative().analyzeFrames('/tmp/a.mp4');
+    expect(analysis.frames, hasLength(1));
+    expect(analysis.frames.first.timeUs, 2000);
+    expect(analysis.frames.first.sharpness, 0.0);
+  });
+
   // 1.0 в little-endian — это 00 00 00 00 00 00 F0 3F. Если бы Dart читал в
-  // порядке хоста на big-endian машине или наоборот, значения были бы другими.
-  test('байты double разбираются в известном порядке', () async {
-    final data = ByteData(8)..setFloat64(0, 1.0, Endian.little);
-    final metrics = Uint8List.fromList(data.buffer.asUint8List());
+  // другом порядке, байты разъехались бы, и время в кадре пришло бы мусором.
+  test('кадр, собранный вручную в little-endian, читается верно', () async {
+    final data = ByteData(kMetricsPerFrame * 8);
+    data.setFloat64(kSharpness * 8, 1.0, Endian.little);
+    data.setFloat64(kTimeUs * 8, 3000.0, Endian.little);
+
     expect(
-      metrics,
+      Uint8List.fromList(data.buffer.asUint8List()).sublist(0, 8),
       [0, 0, 0, 0, 0, 0, 0xF0, 0x3F],
       reason: '1.0 в little-endian',
     );
 
-    mockAnalysis(metrics);
+    mockAnalysis(Uint8List.fromList(data.buffer.asUint8List()));
 
     final analysis = await HighlightCutterNative().analyzeFrames('/tmp/a.mp4');
     expect(analysis.frames, hasLength(1));
-    expect(analysis.frames.first.sharpness, 0.0);
+    expect(analysis.frames.first.sharpness, 1.0);
+    expect(analysis.frames.first.timeUs, 3000);
   });
 }
