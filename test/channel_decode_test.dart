@@ -147,16 +147,26 @@ mockAnalysis(Uint8List(0));
   // другом порядке, байты разъехались бы, и время в кадре пришло бы мусором.
   test('кадр, собранный вручную в little-endian, читается верно', () async {
     final data = ByteData(kMetricsPerFrame * 8);
-    data.setFloat64(kSharpness * 8, 1.0, Endian.little);
     data.setFloat64(kTimeUs * 8, 3000.0, Endian.little);
+    data.setFloat64(kSharpness * 8, 1.0, Endian.little);
 
+    final bytes = Uint8List.fromList(data.buffer.asUint8List());
+    // 3000.0 в little-endian = 00 00 00 00 00 70 A7 40, лежит с начала
+    // кадра, потому что kTimeUs == 0.
     expect(
-      Uint8List.fromList(data.buffer.asUint8List()).sublist(0, 8),
+      bytes.sublist(0, 8),
+      [0, 0, 0, 0, 0, 0x70, 0xA7, 0x40],
+      reason: '3000.0 в little-endian',
+    );
+    // 1.0 в little-endian = 00 00 00 00 00 00 F0 3F, со смещения 8
+    // (kSharpness == 1).
+    expect(
+      bytes.sublist(8, 16),
       [0, 0, 0, 0, 0, 0, 0xF0, 0x3F],
       reason: '1.0 в little-endian',
     );
 
-    mockAnalysis(Uint8List.fromList(data.buffer.asUint8List()));
+    mockAnalysis(bytes);
 
     final analysis = await HighlightCutterNative().analyzeFrames('/tmp/a.mp4');
     expect(analysis.frames, hasLength(1));
