@@ -1,5 +1,3 @@
-import 'dart:typed_data';
-
 import 'package:flutter/services.dart';
 
 import 'models.dart';
@@ -7,6 +5,13 @@ import 'models.dart';
 export 'models.dart';
 
 class HighlightCutterNative {
+  /// Имя метода, которым нативная сторона шлёт прогресс анализа.
+  /// На Android и iOS это MethodChannel с вручную реализованным
+  /// протоколом event channel: нативник отвечает на `listen`/`cancel`
+  /// и вызывает `invokeMethod(progressMethod, progress)`, поэтому
+  /// подписка идёт через setMethodCallHandler, а не через поток.
+  static const String progressMethod = 'analyzeFrames';
+
   HighlightCutterNative({
     MethodChannel? channel,
     MethodChannel? progressChannel,
@@ -37,16 +42,17 @@ class HighlightCutterNative {
       return _decodeAnalysis(await _invokeAnalysis(path, sampleFps));
     }
 
-    final subscription = _progressChannel
-        .receiveBroadcastStream('analyzeFrames')
-        .listen((event) {
-      if (event is num) onProgress(event.toDouble());
+    _progressChannel.setMethodCallHandler((call) async {
+      if (call.method == progressMethod && call.arguments is num) {
+        onProgress((call.arguments as num).toDouble());
+      }
+      return null;
     });
 
     try {
       return _decodeAnalysis(await _invokeAnalysis(path, sampleFps));
     } finally {
-      await subscription.cancel();
+      _progressChannel.setMethodCallHandler(null);
     }
   }
 
@@ -59,7 +65,7 @@ class HighlightCutterNative {
       {
         'path': path,
         'sampleFps': sampleFps,
-        'progressMethod': 'analyzeFrames',
+        'progressMethod': progressMethod,
       },
     );
     if (result == null) throw StateError('Анализ кадров не вернул результат');
