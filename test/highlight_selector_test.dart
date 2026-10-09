@@ -394,6 +394,50 @@ void main() {
     }
   });
 
+  // Регрессия к «все 5 клипов одинаковые»: на 30-минутном фильме пять
+  // клипов приходили с одинаковыми startUs/endUs. Отбор не даёт такой
+  // результат — зазор отбрасывает и пересечения, и точные повторы, — но
+  // инвариант стоит зафиксировать тестом, иначе следующая правка ранжирования
+  // может его тихо сломать.
+  test('30-минутный фильм даёт 5 уникальных непересекающихся клипов', () {
+    const step = 500000; // 0.5 с, 3600 кадров = 30 мин
+    const peakSeconds = [600, 1200, 1800, 2400, 3000];
+
+    final frames = <FrameSample>[];
+    for (var i = 0; i < 3600; i++) {
+      final t = i * step;
+      final isPeak = peakSeconds.any((s) => t >= (s - 2) * 1000000 && t <= (s + 2) * 1000000);
+      frames.add(
+        frame(
+          timeUs: t,
+          sharpness: isPeak ? 0.95 : 0.25,
+          lumaMean: isPeak ? 0.48 : 0.5,
+          colorfulness: isPeak ? 0.9 : 0.2,
+          faces: isPeak ? 2 : 0,
+          motion: isPeak ? 0.5 : 0.05,
+        ),
+      );
+    }
+
+    final result = selector.select(
+      analysisOf(frames),
+      const HighlightSettings(maxClips: 5, clipDurationSec: 8, minGapSec: 30),
+    );
+
+    expect(result, hasLength(5));
+
+    final ids = <String>{};
+    for (final moment in result) {
+      expect(moment.endUs, greaterThan(moment.startUs));
+      expect(ids.add(moment.id), isTrue,
+          reason: 'повтор момента ${moment.id}');
+    }
+    for (var i = 1; i < result.length; i++) {
+      expect(result[i].startUs, greaterThanOrEqualTo(result[i - 1].endUs + 30000000),
+          reason: 'клипы ${result[i - 1].id} и ${result[i].id} ближе, чем minGapSec');
+    }
+  });
+
   test('частая смена кадров не ломает отбор', () {
     const step = 500000;
     final frames =

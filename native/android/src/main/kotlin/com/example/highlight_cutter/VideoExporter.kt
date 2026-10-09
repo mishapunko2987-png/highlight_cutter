@@ -15,10 +15,15 @@ import android.opengl.EGLExt
 import android.opengl.EGLSurface
 import android.opengl.GLES11Ext
 import android.opengl.GLES20
+import android.os.Handler
+import android.os.HandlerThread
+import android.util.Log
 import android.view.Surface
 import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.util.concurrent.Semaphore
+import java.util.concurrent.TimeUnit
 import kotlin.math.max
 import kotlin.math.min
 
@@ -57,6 +62,7 @@ internal class VideoExporter(private val request: ExportRequest) {
         const val MAX_WIDTH = 1920
         const val COLOR_FORMAT_SURFACE = 0x7F000789
         const val IDLE_ROUNDS = 30
+        const val TAG = "HighlightCutter"
     }
 
     fun run(): String {
@@ -191,6 +197,11 @@ internal class VideoExporter(private val request: ExportRequest) {
         var decoderFinished = false
         var idleRounds = 0
 
+        // Кадров, реально дошедших до энкодера. Считается на каждый диапазон:
+        // если экспорт прошёл, а счётчик нулевой, значит текстура не
+        // обновлялась ни разу и весь клип записан одним кадром.
+        var renderedFrames = 0
+
         while (!decoderFinished) {
             if (!inputDone) {
                 val inputIndex = decoder.dequeueInputBuffer(TIMEOUT_US)
@@ -233,7 +244,9 @@ internal class VideoExporter(private val request: ExportRequest) {
                     decoder.releaseOutputBuffer(outputIndex, true)
                     val pts = decoderInfo.presentationTimeUs - range.first + state.videoOffsetUs
                     egl.setPresentationTime(pts)
-                    egl.swapAndDraw()
+                    // Кадр не успел — swap пропущен, чтобы не записать в ролик
+                    // предыдущую картинку дважды подряд.
+                    if (egl.swapAndDraw()) renderedFrames++
                 } else {
                     decoder.releaseOutputBuffer(outputIndex, false)
                 }
@@ -250,6 +263,14 @@ internal class VideoExporter(private val request: ExportRequest) {
         }
 
         drainEncoder(encoder, muxer, state)
+
+        // Диапазон, в котором не отрисовано ни одного кадра, — это тот самый
+        // случай «весь клип из одного кадра». Раньше он проходил молча.
+        if (renderedFrames == 0) {
+            Log.w(TAG, "Диапазон $range: ни один кадр не отрисован, текстура не обновилась")
+        } else {
+            Log.d(TAG, "Диапазон $range: отрисовано кадров $renderedFrames")
+        }
     }
 
     private fun writeAudio(muxer: MediaMuxer, state: MuxState, samples: List<EncodedSample>) {
@@ -606,6 +627,21 @@ internal class EglBridge(private val surface: Surface) {
     // кадр через updateTexImage(), текстура пустая.
     private var frameTexture: SurfaceTexture? = null
 
+    /**
+     * Сигнал «декодер положил кадр в SurfaceTexture».
+     *
+     * releaseOutputBuffer(index, true) возвращается сразу, не дожидаясь
+     * отрисовки: кадр ещё может рендериться, когда swapAndDraw() зовёт
+     * updateTexImage(). Без этого семафора updateTexImage() цепляет
+     * предыдущий буфер (или пустую текстуру, если кадра ещё не было), и
+     * весь ролик пишется одним и тем же кадром — в каждом выходном файле
+     * свой, но одинаковый внутри.
+     */
+    private val frameReady = Semaphore(0)
+
+    /** Поток, на котором SurfaceTexture сообщает о готовом кадре. */
+    private var callbackThread: HandlerThread? = null
+
     // glVertexAttribPointer не копирует данные, поэтому буферы вершин
     // нужно удерживать — иначе GC освободит память под ними.
     private var positionBuffer: ByteBuffer? = null
@@ -621,8 +657,20 @@ internal class EglBridge(private val surface: Surface) {
      * константу, и в ролике оказывается один и тот же кадр.
      */
     fun createDecoderSurface(width: Int, height: Int): Surface {
-        frameTexture = SurfaceTexture(textureId).also {
-            it.setDefaultBufferSize(width, height)
+        val thread = HandlerThread("highlight-cutter-frame-callback").also {
+            it.start()
+            callbackThread = it
+        }
+        frameTexture = SurfaceTexture(textureId).also { texture ->
+            texture.setDefaultBufferSize(width, height)
+            // Слушатель снимает семафор с потока, на котором вызван
+            // setOnFrameAvailableListener. setOnFrameAvailableListener без
+            // обработчика требует Looper, а распаковка идёт из фонового потока
+            // экспорта, где его нет.
+            texture.setOnFrameAvailableListener(
+                { frameReady.release() },
+                Handler(thread.looper),
+            )
         }
         return Surface(frameTexture!!)
     }
@@ -669,20 +717,47 @@ internal class EglBridge(private val surface: Surface) {
         presentationTimeUs = us
     }
 
-    fun swapAndDraw() {
-        // Забираем очередной кадр из SurfaceTexture. Пропуск этого вызова —
-        // причина, по которой весь ролик состоял из одного кадра.
+    /**
+     * Рисует очередной кадр декодера в поверхность энкодера.
+     *
+     * Возвращает false, если за отведённое время кадр так и не появился:
+     * перерисовывать texture, которую никто не обновил, бессмысленно — в
+     * ролик попадёт предыдущий кадр.
+     */
+    fun swapAndDraw(): Boolean {
+        // Забираем кадр из SurfaceTexture. Пропуск этого вызова — причина, по
+        // которой весь ролик состоял из одного кадра; отсутствие ожидания
+        // перед ним — причина, по которой все выходные клипы содержали
+        // один и тот же кадр.
+        val arrived = frameReady.tryAcquire(FRAME_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+        if (!arrived) return false
         frameTexture?.updateTexImage()
         EGLExt.eglPresentationTimeANDROID(display, eglSurface, presentationTimeUs)
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
         GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, textureId)
         GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
         EGL14.eglSwapBuffers(display, eglSurface)
+        return true
+    }
+
+    private companion object {
+        /**
+         * Сколько ждать кадр от декодера перед updateTexImage().
+         *
+         * Синхронный декодер отдаёт кадр почти сразу, аппаратный — быстрее
+         * одного кадра. Значение заведомо больше времени кадра (33 мс при
+         * 30 fps), поэтому таймаут срабатывает только на реально потерянном
+         * кадре, а не на медленном устройстве.
+         */
+        const val FRAME_TIMEOUT_MS = 500L
     }
 
     fun release() {
+        frameTexture?.setOnFrameAvailableListener(null)
         frameTexture?.release()
         frameTexture = null
+        callbackThread?.quitSafely()
+        callbackThread = null
         if (display != EGL14.EGL_NO_DISPLAY) {
             EGL14.eglMakeCurrent(
                 display,
