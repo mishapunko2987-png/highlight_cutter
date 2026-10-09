@@ -219,8 +219,8 @@ class VideoPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
     private fun handleExportClip(call: MethodCall, result: MethodChannel.Result) {
         val source = call.argument<String>("sourcePath")
         val output = call.argument<String>("outputPath")
-        val startUs = call.argument<Int>("startUs")
-        val endUs = call.argument<Int>("endUs")
+        val startUs = call.argument<Number>("startUs")?.toLong()
+        val endUs = call.argument<Number>("endUs")?.toLong()
         if (source.isNullOrBlank() || output.isNullOrBlank() ||
             startUs == null || endUs == null || endUs <= startUs
         ) {
@@ -230,11 +230,11 @@ class VideoPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
         val request = ExportRequest(
             sourcePath = source,
             outputPath = output,
-            ranges = listOf(startUs.toLong() to endUs.toLong()),
-            width = call.argument<Int>("width") ?: 0,
-            height = call.argument<Int>("height") ?: 0,
-            bitrate = call.argument<Int>("bitrate") ?: DEFAULT_BITRATE,
-            fps = call.argument<Int>("fps") ?: 0,
+            ranges = listOf(startUs to endUs),
+            width = call.argument<Number>("width")?.toInt() ?: 0,
+            height = call.argument<Number>("height")?.toInt() ?: 0,
+            bitrate = call.argument<Number>("bitrate")?.toInt() ?: DEFAULT_BITRATE,
+            fps = call.argument<Number>("fps")?.toInt() ?: 0,
         )
         Thread {
             try {
@@ -248,7 +248,7 @@ class VideoPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
     private fun handleExportTrailer(call: MethodCall, result: MethodChannel.Result) {
         val source = call.argument<String>("sourcePath")
         val output = call.argument<String>("outputPath")
-        val ranges = call.argument<List<List<Int>>>("ranges")
+        val ranges = call.argument<List<List<Number>>>("ranges")
         if (source.isNullOrBlank() || output.isNullOrBlank() || ranges.isNullOrEmpty()) {
             result.error("bad_args", "invalid trailer request", null)
             return
@@ -264,10 +264,10 @@ class VideoPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
             sourcePath = source,
             outputPath = output,
             ranges = parsed,
-            width = call.argument<Int>("width") ?: 0,
-            height = call.argument<Int>("height") ?: 0,
-            bitrate = call.argument<Int>("bitrate") ?: 6_000_000,
-            fps = call.argument<Int>("fps") ?: 0,
+            width = call.argument<Number>("width")?.toInt() ?: 0,
+            height = call.argument<Number>("height")?.toInt() ?: 0,
+            bitrate = call.argument<Number>("bitrate")?.toInt() ?: 6_000_000,
+            fps = call.argument<Number>("fps")?.toInt() ?: 0,
         )
         Thread {
             try {
@@ -280,7 +280,7 @@ class VideoPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
 
     private fun handleThumbnail(call: MethodCall, result: MethodChannel.Result) {
         val path = call.argument<String>("path")
-        val timeUs = call.argument<Int>("timeUs") ?: 0
+        val timeUs = call.argument<Number>("timeUs")?.toLong() ?: 0L
         if (path.isNullOrBlank()) {
             result.error("bad_args", "path is required", null)
             return
@@ -290,7 +290,7 @@ class VideoPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
             try {
                 retriever.setDataSource(path)
                 val bitmap = retriever.getFrameAtTime(
-                    timeUs.toLong(),
+                    timeUs,
                     MediaMetadataRetriever.OPTION_CLOSEST
                 )
                 if (bitmap == null) {
